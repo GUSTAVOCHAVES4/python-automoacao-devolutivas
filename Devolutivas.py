@@ -262,8 +262,15 @@ class AssistenteTriagem:
             if p: 
                 entry_p1.delete(0, tk.END)
                 entry_p1.insert(0, os.path.normpath(p))
+
+        def buscar_pasta_p1():
+            p = filedialog.askdirectory(parent=janela_comp, title="Selecione a pasta com as planilhas novas")
+            if p:
+                entry_p1.delete(0, tk.END)
+                entry_p1.insert(0, os.path.normpath(p))
             
-        tk.Button(frame_inputs, text="📂 Buscar", command=buscar_p1).grid(row=0, column=2, padx=5, pady=2)
+        tk.Button(frame_inputs, text="📄 Arquivo", command=buscar_p1).grid(row=0, column=2, padx=5, pady=2)
+        tk.Button(frame_inputs, text="📁 Pasta", command=buscar_pasta_p1).grid(row=0, column=3, padx=5, pady=2)
 
         tk.Label(frame_inputs, text="Planilha 2 (Sua Planilha Master):", font=("Segoe UI", 10, "bold"), bg="#2c3e50", fg="#3498db").grid(row=1, column=0, sticky="e", padx=5, pady=2)
         entry_p2 = tk.Entry(frame_inputs, width=60, font=("Segoe UI", 10))
@@ -342,20 +349,18 @@ class AssistenteTriagem:
                 for item in tree_comp.get_children(): tree_comp.delete(item)
                 linhas_novas_para_exportar.clear()
                 
-                # Leitura Super Segura da Planilha 1 (Sem Excel invisível travando tudo)
-                df1 = None
+                registros_novos = []
                 try:
                     df1 = ler_planilha_excel(p1_path, entry_aba_p1.get())
                 except Exception as e_ler:
                     lbl_status.config(text="Status: Erro de formato no arquivo Novo.", fg="#c0392b")
                     messagebox.showerror("Ação Necessária: Formato Incompatível", 
-                        "O programa não conseguiu ler a 'Planilha 1'.\n\n"
-                        "Isso geralmente acontece quando sistemas corporativos geram relatórios que parecem ser '.xls', mas na verdade são protegidos.\n\n"
-                        "SOLUÇÃO RÁPIDA E GARANTIDA:\n"
-                        "1. Abra esse arquivo Novo no seu próprio Excel.\n"
-                        "2. Vá em 'Arquivo' -> 'Salvar Como'.\n"
-                        "3. Salve o documento escolhendo o tipo 'Pasta de Trabalho do Excel (*.xlsx)'.\n"
-                        "4. Volte aqui, selecione esse arquivo .xlsx novo e compare!", parent=janela_comp)
+                        "O programa não conseguiu ler a Planilha/Pasta Nova.\n\n"
+                        "Se for arquivo .xls antigo ou relatório de sistema, abra no Excel e salve como .xlsx.\n\n"
+                        f"Detalhe técnico:\n{e_ler}", parent=janela_comp)
+                    return
+                if not registros_novos:
+                    messagebox.showwarning("Nada encontrado", "Não encontrei nenhuma linha de devolutiva na Planilha/Pasta Nova.", parent=janela_comp)
                     return
                     
                 lbl_status.config(text="Status: Lendo Planilha Master (Isso pode demorar dependendo do tamanho)...", fg="#2980b9")
@@ -385,7 +390,7 @@ class AssistenteTriagem:
                     ))
                     assinaturas_master.add(assinatura)
                     
-                lbl_status.config(text="Status: Cruzando dados para encontrar repetidas...", fg="#8e44ad")
+                lbl_status.config(text="Status: Separando o que já existe do que é novo...", fg="#8e44ad")
                 janela_comp.update_idletasks()
 
                 for idx, row in df1.iterrows():
@@ -420,17 +425,19 @@ class AssistenteTriagem:
                     assunto_resumo = val_assunto.replace('\n', ' ')[:80] + "..." if len(val_assunto)>80 else val_assunto.replace('\n', ' ')
                     
                     if is_dup:
-                        tree_comp.insert("", tk.END, values=("🔴 REPETIDA", val_mes, val_unid, val_quem, assunto_resumo), tags=("repetida",))
+                        total_repetidas += 1
+                        tree_comp.insert("", tk.END, values=valores, tags=("repetida",))
                     else:
-                        tree_comp.insert("", tk.END, values=("🟢 NOVA!", val_mes, val_unid, val_quem, assunto_resumo), tags=("nova",))
+                        tree_comp.insert("", tk.END, values=valores, tags=("nova",))
                         linhas_novas_para_exportar.append({
-                            "MÊS": val_mes, "UNIDADE": val_unid, "QUEM": val_quem, 
-                            "ASSUNTO DA RECLAMAÇÃO": val_assunto, "RESOLUÇÃO DA RECLAMAÇÃO": val_resol, "TAG": ""
+                            "MÊS": registro["MÊS"], "UNIDADE": registro["UNIDADE"], "QUEM": registro["QUEM"],
+                            "ASSUNTO DA RECLAMAÇÃO": registro["ASSUNTO DA RECLAMAÇÃO"],
+                            "RESOLUÇÃO DA RECLAMAÇÃO": registro["RESOLUÇÃO DA RECLAMAÇÃO"], "TAG": ""
                         })
                         assinaturas_novas_vistas.add(assinatura_atual)
                         
-                lbl_status.config(text=f"Status: Análise concluída! Encontramos {len(linhas_novas_para_exportar)} reclamações inéditas.", fg="#27ae60")
-                messagebox.showinfo("✅ Concluído", f"Análise Finalizada!\n\nForam encontradas {len(linhas_novas_para_exportar)} reclamações NOVAS que não estão na sua Master.", parent=janela_comp)
+                lbl_status.config(text=f"Status: Análise concluída! {len(linhas_novas_para_exportar)} novas e {total_repetidas} repetidas.", fg="#27ae60")
+                messagebox.showinfo("✅ Concluído", f"Análise Finalizada!\n\nNOVAS para migrar: {len(linhas_novas_para_exportar)}\nREPETIDAS ignoradas: {total_repetidas}", parent=janela_comp)
 
             except Exception as e:
                 lbl_status.config(text="Status: Ocorreu um erro.", fg="#c0392b")
