@@ -64,85 +64,6 @@ def obter_valor_linha(row, indice):
     return str(row.iloc[indice]).strip() if len(row) > indice and normalizar_texto_comparacao(row.iloc[indice]) else ""
 
 
-def listar_planilhas_entrada(caminho):
-    """Aceita um arquivo ou uma pasta e devolve todos os Excel válidos para varrer."""
-    caminho = os.path.normpath(caminho)
-    if os.path.isdir(caminho):
-        arquivos = []
-        for nome in sorted(os.listdir(caminho)):
-            if nome.startswith("~$"):
-                continue
-            if nome.lower().endswith((".xlsx", ".xls")):
-                arquivos.append(os.path.join(caminho, nome))
-        return arquivos
-    return [caminho]
-
-
-def detectar_colunas_devolutiva(df):
-    """Procura cabeçalho por nome; se não achar, usa a ordem padrão das planilhas master."""
-    mapa_padrao = {"mes": 0, "unidade": 1, "quem": 2, "assunto": 3, "resolucao": 4}
-    palavras = {
-        "mes": ("mês", "mes"),
-        "unidade": ("unidade", "escola", "polo"),
-        "quem": ("quem", "setor", "área", "area"),
-        "assunto": ("assunto", "reclamação", "reclamacao", "descrição", "descricao"),
-        "resolucao": ("resolução", "resolucao", "devolutiva", "resposta", "solução", "solucao"),
-    }
-    limite = min(15, len(df))
-    melhor_linha = None
-    melhor_mapa = {}
-    for idx in range(limite):
-        mapa = {}
-        for col_idx, valor in enumerate(df.iloc[idx].tolist()):
-            texto = normalizar_texto_comparacao(valor)
-            if not texto:
-                continue
-            for campo, termos in palavras.items():
-                if campo not in mapa and any(termo in texto for termo in termos):
-                    mapa[campo] = col_idx
-        if len(mapa) > len(melhor_mapa):
-            melhor_linha = idx
-            melhor_mapa = mapa
-    if len(melhor_mapa) >= 3:
-        mapa = mapa_padrao.copy()
-        mapa.update(melhor_mapa)
-        return mapa, melhor_linha + 1
-    return mapa_padrao, 0
-
-
-def extrair_registros_devolutivas(caminho, aba=None):
-    """Transforma qualquer planilha de devolutivas em registros padronizados para comparação."""
-    registros = []
-    for arquivo in listar_planilhas_entrada(caminho):
-        dados = ler_planilha_excel(arquivo, aba)
-        if dados.empty:
-            continue
-        colunas, linha_inicio = detectar_colunas_devolutiva(dados)
-        for idx in range(linha_inicio, len(dados)):
-            row = dados.iloc[idx]
-            mes = obter_valor_linha(row, colunas["mes"])
-            unidade = obter_valor_linha(row, colunas["unidade"])
-            quem = obter_valor_linha(row, colunas["quem"])
-            assunto = obter_valor_linha(row, colunas["assunto"])
-            resolucao = obter_valor_linha(row, colunas["resolucao"])
-            if normalizar_texto_comparacao(mes) in ("mês", "mes") or normalizar_texto_comparacao(unidade) == "unidade":
-                continue
-            if not any((mes, unidade, quem, assunto, resolucao)):
-                continue
-            assinatura = montar_assinatura_linha(mes, unidade, quem, assunto, resolucao)
-            registros.append({
-                "MÊS": mes,
-                "UNIDADE": unidade,
-                "QUEM": quem,
-                "ASSUNTO DA RECLAMAÇÃO": assunto,
-                "RESOLUÇÃO DA RECLAMAÇÃO": resolucao,
-                "TAG": "",
-                "assinatura": assinatura,
-                "origem": os.path.basename(arquivo),
-            })
-    return registros
-
-
 def ler_planilha_excel(caminho, aba=None):
     """Lê .xls/.xlsx; quando aba fica vazia, junta todas as abas do arquivo."""
     aba_limpa = aba.strip() if isinstance(aba, str) else aba
@@ -430,7 +351,7 @@ class AssistenteTriagem:
                 
                 registros_novos = []
                 try:
-                    registros_novos = extrair_registros_devolutivas(p1_path, entry_aba_p1.get())
+                    df1 = ler_planilha_excel(p1_path, entry_aba_p1.get())
                 except Exception as e_ler:
                     lbl_status.config(text="Status: Erro de formato no arquivo Novo.", fg="#c0392b")
                     messagebox.showerror("Ação Necessária: Formato Incompatível", 
@@ -449,25 +370,60 @@ class AssistenteTriagem:
                 if aba_p2 not in wb.sheetnames:
                     messagebox.showerror("Erro de Aba", f"A aba '{aba_p2}' não foi encontrada na sua planilha Master.", parent=janela_comp)
                     return
-
-                registros_master = extrair_registros_devolutivas(p2_path, aba_p2)
-                assinaturas_master = {registro["assinatura"] for registro in registros_master}
+                ws = wb[aba_p2]
+                
+                dados_master = []
+                assinaturas_master = set()
                 assinaturas_novas_vistas = set()
-                total_repetidas = 0
+                for i, row in enumerate(ws.iter_rows(values_only=True), start=1):
+                    if i == 1 or not any(row): continue 
+                    mes = row[0] if len(row)>0 else ""
+                    unid = row[1] if len(row)>1 else ""
+                    quem = row[2] if len(row)>2 else ""
+                    ass = row[3] if len(row)>3 else ""
+                    resol = row[4] if len(row)>4 else ""
+                    assinatura = montar_assinatura_linha(mes, unid, quem, ass, resol)
+                    dados_master.append((
+                        normalizar_texto_comparacao(mes), normalizar_texto_comparacao(unid),
+                        normalizar_texto_comparacao(quem), normalizar_texto_comparacao(ass),
+                        normalizar_texto_comparacao(resol), assinatura
+                    ))
+                    assinaturas_master.add(assinatura)
                     
                 lbl_status.config(text="Status: Separando o que já existe do que é novo...", fg="#8e44ad")
                 janela_comp.update_idletasks()
 
-                for registro in registros_novos:
-                    assinatura_atual = registro["assinatura"]
+                for idx, row in df1.iterrows():
+                    val_mes = obter_valor_linha(row, 0)
+                    val_unid = obter_valor_linha(row, 1)
+                    val_quem = obter_valor_linha(row, 2)
+                    val_assunto = obter_valor_linha(row, 3)
+                    val_resol = obter_valor_linha(row, 4)
+                    
+                    if val_mes.upper() == "MÊS" or val_unid.upper() == "UNIDADE":
+                        continue
+                        
+                    if not val_mes and not val_unid and not val_assunto: continue
+                    
+                    assinatura_atual = montar_assinatura_linha(val_mes, val_unid, val_quem, val_assunto, val_resol)
                     is_dup = assinatura_atual in assinaturas_master or assinatura_atual in assinaturas_novas_vistas
-                    assunto_resumo = registro["ASSUNTO DA RECLAMAÇÃO"].replace('\n', ' ')
-                    assunto_resumo = assunto_resumo[:80] + "..." if len(assunto_resumo)>80 else assunto_resumo
-                    valores = (
-                        "🔴 REPETIDA" if is_dup else "🟢 NOVA!",
-                        registro["MÊS"], registro["UNIDADE"], registro["QUEM"],
-                        f"[{registro['origem']}] {assunto_resumo}"
-                    )
+                    # Se não for exatamente igual, faz uma comparação inteligente por campos principais.
+                    if not is_dup:
+                        n_mes = normalizar_texto_comparacao(val_mes)
+                        n_unid = normalizar_texto_comparacao(val_unid)
+                        n_quem = normalizar_texto_comparacao(val_quem)
+                        n_assunto = normalizar_texto_comparacao(val_assunto)
+                        n_resol = normalizar_texto_comparacao(val_resol)
+                        for m_mes, m_unid, m_quem, m_ass, m_resol, _assinatura in dados_master:
+                            campos_principais_iguais = n_mes == m_mes and n_unid == m_unid and n_quem == m_quem
+                            assunto_parecido = bool(n_assunto and m_ass and difflib.SequenceMatcher(None, n_assunto, m_ass).ratio() >= 0.85)
+                            resolucao_parecida = (not n_resol and not m_resol) or bool(n_resol and m_resol and difflib.SequenceMatcher(None, n_resol, m_resol).ratio() >= 0.85)
+                            if campos_principais_iguais and assunto_parecido and resolucao_parecida:
+                                is_dup = True
+                                break
+                                
+                    assunto_resumo = val_assunto.replace('\n', ' ')[:80] + "..." if len(val_assunto)>80 else val_assunto.replace('\n', ' ')
+                    
                     if is_dup:
                         total_repetidas += 1
                         tree_comp.insert("", tk.END, values=valores, tags=("repetida",))
