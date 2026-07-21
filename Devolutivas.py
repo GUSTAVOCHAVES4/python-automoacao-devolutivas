@@ -42,6 +42,125 @@ except ImportError:
 
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
+
+def normalizar_texto_comparacao(valor):
+    """Normaliza células do Excel para comparar conteúdo sem diferença de maiúsculas/espaços."""
+    if valor is None:
+        return ""
+    if isinstance(valor, float) and math.isnan(valor):
+        return ""
+    texto = str(valor).strip().lower()
+    texto = " ".join(texto.split())
+    return texto
+
+
+def montar_assinatura_linha(mes, unidade, quem, assunto, resolucao=""):
+    """Cria uma chave de comparação usando os campos importantes da devolutiva."""
+    campos = [mes, unidade, quem, assunto, resolucao]
+    return " | ".join(normalizar_texto_comparacao(campo) for campo in campos)
+
+
+def obter_valor_linha(row, indice):
+    return str(row.iloc[indice]).strip() if len(row) > indice and normalizar_texto_comparacao(row.iloc[indice]) else ""
+
+
+def listar_planilhas_entrada(caminho):
+    """Aceita um arquivo ou uma pasta e devolve todos os Excel válidos para varrer."""
+    caminho = os.path.normpath(caminho)
+    if os.path.isdir(caminho):
+        arquivos = []
+        for nome in sorted(os.listdir(caminho)):
+            if nome.startswith("~$"):
+                continue
+            if nome.lower().endswith((".xlsx", ".xls")):
+                arquivos.append(os.path.join(caminho, nome))
+        return arquivos
+    return [caminho]
+
+
+def detectar_colunas_devolutiva(df):
+    """Procura cabeçalho por nome; se não achar, usa a ordem padrão das planilhas master."""
+    mapa_padrao = {"mes": 0, "unidade": 1, "quem": 2, "assunto": 3, "resolucao": 4}
+    palavras = {
+        "mes": ("mês", "mes"),
+        "unidade": ("unidade", "escola", "polo"),
+        "quem": ("quem", "setor", "área", "area"),
+        "assunto": ("assunto", "reclamação", "reclamacao", "descrição", "descricao"),
+        "resolucao": ("resolução", "resolucao", "devolutiva", "resposta", "solução", "solucao"),
+    }
+    limite = min(15, len(df))
+    melhor_linha = None
+    melhor_mapa = {}
+    for idx in range(limite):
+        mapa = {}
+        for col_idx, valor in enumerate(df.iloc[idx].tolist()):
+            texto = normalizar_texto_comparacao(valor)
+            if not texto:
+                continue
+            for campo, termos in palavras.items():
+                if campo not in mapa and any(termo in texto for termo in termos):
+                    mapa[campo] = col_idx
+        if len(mapa) > len(melhor_mapa):
+            melhor_linha = idx
+            melhor_mapa = mapa
+    if len(melhor_mapa) >= 3:
+        mapa = mapa_padrao.copy()
+        mapa.update(melhor_mapa)
+        return mapa, melhor_linha + 1
+    return mapa_padrao, 0
+
+
+def extrair_registros_devolutivas(caminho, aba=None):
+    """Transforma qualquer planilha de devolutivas em registros padronizados para comparação."""
+    registros = []
+    for arquivo in listar_planilhas_entrada(caminho):
+        dados = ler_planilha_excel(arquivo, aba)
+        if dados.empty:
+            continue
+        colunas, linha_inicio = detectar_colunas_devolutiva(dados)
+        for idx in range(linha_inicio, len(dados)):
+            row = dados.iloc[idx]
+            mes = obter_valor_linha(row, colunas["mes"])
+            unidade = obter_valor_linha(row, colunas["unidade"])
+            quem = obter_valor_linha(row, colunas["quem"])
+            assunto = obter_valor_linha(row, colunas["assunto"])
+            resolucao = obter_valor_linha(row, colunas["resolucao"])
+            if normalizar_texto_comparacao(mes) in ("mês", "mes") or normalizar_texto_comparacao(unidade) == "unidade":
+                continue
+            if not any((mes, unidade, quem, assunto, resolucao)):
+                continue
+            assinatura = montar_assinatura_linha(mes, unidade, quem, assunto, resolucao)
+            registros.append({
+                "MÊS": mes,
+                "UNIDADE": unidade,
+                "QUEM": quem,
+                "ASSUNTO DA RECLAMAÇÃO": assunto,
+                "RESOLUÇÃO DA RECLAMAÇÃO": resolucao,
+                "TAG": "",
+                "assinatura": assinatura,
+                "origem": os.path.basename(arquivo),
+            })
+    return registros
+
+
+def ler_planilha_excel(caminho, aba=None):
+    """Lê .xls/.xlsx; quando aba fica vazia, junta todas as abas do arquivo."""
+    aba_limpa = aba.strip() if isinstance(aba, str) else aba
+    sheet_name = aba_limpa if aba_limpa else None
+    dados = pd.read_excel(caminho, sheet_name=sheet_name, header=None).fillna("")
+    if isinstance(dados, dict):
+        partes = []
+        for nome_aba, df in dados.items():
+            if df.empty:
+                continue
+            df = df.copy()
+            df["__aba_origem__"] = nome_aba
+            partes.append(df)
+        if not partes:
+            return pd.DataFrame()
+        return pd.concat(partes, ignore_index=True)
+    return dados
+
 class AssistenteTriagem:
     def __init__(self, root):
         self.root = root
@@ -222,8 +341,15 @@ class AssistenteTriagem:
             if p: 
                 entry_p1.delete(0, tk.END)
                 entry_p1.insert(0, os.path.normpath(p))
+
+        def buscar_pasta_p1():
+            p = filedialog.askdirectory(parent=janela_comp, title="Selecione a pasta com as planilhas novas")
+            if p:
+                entry_p1.delete(0, tk.END)
+                entry_p1.insert(0, os.path.normpath(p))
             
-        tk.Button(frame_inputs, text="📂 Buscar", command=buscar_p1).grid(row=0, column=2, padx=5, pady=2)
+        tk.Button(frame_inputs, text="📄 Arquivo", command=buscar_p1).grid(row=0, column=2, padx=5, pady=2)
+        tk.Button(frame_inputs, text="📁 Pasta", command=buscar_pasta_p1).grid(row=0, column=3, padx=5, pady=2)
 
         tk.Label(frame_inputs, text="Planilha 2 (Sua Planilha Master):", font=("Segoe UI", 10, "bold"), bg="#2c3e50", fg="#3498db").grid(row=1, column=0, sticky="e", padx=5, pady=2)
         entry_p2 = tk.Entry(frame_inputs, width=60, font=("Segoe UI", 10))
@@ -238,10 +364,14 @@ class AssistenteTriagem:
             
         tk.Button(frame_inputs, text="📂 Buscar", command=buscar_p2).grid(row=1, column=2, padx=5, pady=2)
 
-        tk.Label(frame_inputs, text="Aba/Ano da Master (Ex: 2024):", font=("Segoe UI", 10, "bold"), bg="#2c3e50", fg="white").grid(row=2, column=0, sticky="e", padx=5, pady=2)
+        tk.Label(frame_inputs, text="Aba da Planilha 1 (vazio = todas):", font=("Segoe UI", 10, "bold"), bg="#2c3e50", fg="white").grid(row=2, column=0, sticky="e", padx=5, pady=2)
+        entry_aba_p1 = tk.Entry(frame_inputs, width=15, font=("Segoe UI", 10))
+        entry_aba_p1.grid(row=2, column=1, sticky="w", padx=5, pady=2)
+
+        tk.Label(frame_inputs, text="Aba/Ano da Master (Ex: 2025):", font=("Segoe UI", 10, "bold"), bg="#2c3e50", fg="white").grid(row=3, column=0, sticky="e", padx=5, pady=2)
         entry_aba_comp = tk.Entry(frame_inputs, width=15, font=("Segoe UI", 10))
         entry_aba_comp.insert(0, self.entry_aba.get())
-        entry_aba_comp.grid(row=2, column=1, sticky="w", padx=5, pady=2)
+        entry_aba_comp.grid(row=3, column=1, sticky="w", padx=5, pady=2)
 
         # Fundo fixo para não sumir
         frame_bottom_area = tk.Frame(janela_comp)
@@ -298,20 +428,18 @@ class AssistenteTriagem:
                 for item in tree_comp.get_children(): tree_comp.delete(item)
                 linhas_novas_para_exportar.clear()
                 
-                # Leitura Super Segura da Planilha 1 (Sem Excel invisível travando tudo)
-                df1 = None
+                registros_novos = []
                 try:
-                    df1 = pd.read_excel(p1_path, header=None).fillna("")
+                    registros_novos = extrair_registros_devolutivas(p1_path, entry_aba_p1.get())
                 except Exception as e_ler:
                     lbl_status.config(text="Status: Erro de formato no arquivo Novo.", fg="#c0392b")
                     messagebox.showerror("Ação Necessária: Formato Incompatível", 
-                        "O programa não conseguiu ler a 'Planilha 1'.\n\n"
-                        "Isso geralmente acontece quando sistemas corporativos geram relatórios que parecem ser '.xls', mas na verdade são protegidos.\n\n"
-                        "SOLUÇÃO RÁPIDA E GARANTIDA:\n"
-                        "1. Abra esse arquivo Novo no seu próprio Excel.\n"
-                        "2. Vá em 'Arquivo' -> 'Salvar Como'.\n"
-                        "3. Salve o documento escolhendo o tipo 'Pasta de Trabalho do Excel (*.xlsx)'.\n"
-                        "4. Volte aqui, selecione esse arquivo .xlsx novo e compare!", parent=janela_comp)
+                        "O programa não conseguiu ler a Planilha/Pasta Nova.\n\n"
+                        "Se for arquivo .xls antigo ou relatório de sistema, abra no Excel e salve como .xlsx.\n\n"
+                        f"Detalhe técnico:\n{e_ler}", parent=janela_comp)
+                    return
+                if not registros_novos:
+                    messagebox.showwarning("Nada encontrado", "Não encontrei nenhuma linha de devolutiva na Planilha/Pasta Nova.", parent=janela_comp)
                     return
                     
                 lbl_status.config(text="Status: Lendo Planilha Master (Isso pode demorar dependendo do tamanho)...", fg="#2980b9")
@@ -321,59 +449,39 @@ class AssistenteTriagem:
                 if aba_p2 not in wb.sheetnames:
                     messagebox.showerror("Erro de Aba", f"A aba '{aba_p2}' não foi encontrada na sua planilha Master.", parent=janela_comp)
                     return
-                ws = wb[aba_p2]
-                
-                dados_master = []
-                for i, row in enumerate(ws.iter_rows(values_only=True), start=1):
-                    if i == 1 or not any(row): continue 
-                    mes = str(row[0]).strip().lower() if len(row)>0 and row[0] is not None else ""
-                    unid = str(row[1]).strip().lower() if len(row)>1 and row[1] is not None else ""
-                    quem = str(row[2]).strip().lower() if len(row)>2 and row[2] is not None else ""
-                    ass = str(row[3]).strip().lower() if len(row)>3 and row[3] is not None else ""
-                    dados_master.append((mes, unid, quem, ass))
+
+                registros_master = extrair_registros_devolutivas(p2_path, aba_p2)
+                assinaturas_master = {registro["assinatura"] for registro in registros_master}
+                assinaturas_novas_vistas = set()
+                total_repetidas = 0
                     
-                lbl_status.config(text="Status: Cruzando dados para encontrar repetidas...", fg="#8e44ad")
+                lbl_status.config(text="Status: Separando o que já existe do que é novo...", fg="#8e44ad")
                 janela_comp.update_idletasks()
 
-                for idx, row in df1.iterrows():
-                    cols_count = len(row)
-                    val_mes = str(row.iloc[0]).strip() if cols_count > 0 else ""
-                    val_unid = str(row.iloc[1]).strip() if cols_count > 1 else ""
-                    val_quem = str(row.iloc[2]).strip() if cols_count > 2 else ""
-                    val_assunto = str(row.iloc[3]).strip() if cols_count > 3 else ""
-                    val_resol = str(row.iloc[4]).strip() if cols_count > 4 else ""
-                    
-                    if val_mes.upper() == "MÊS" or val_unid.upper() == "UNIDADE":
-                        continue
-                        
-                    if not val_mes and not val_unid and not val_assunto: continue
-                    
-                    is_dup = False
-                    # Compara com a base master
-                    for m_mes, m_unid, m_quem, m_ass in dados_master:
-                        if val_mes.lower() == m_mes and val_unid.lower() == m_unid and val_quem.lower() == m_quem:
-                            if val_assunto and m_ass:
-                                sim = difflib.SequenceMatcher(None, val_assunto.lower(), m_ass).ratio()
-                                if sim > 0.60:
-                                    is_dup = True
-                                    break
-                            else:
-                                is_dup = True
-                                break
-                                
-                    assunto_resumo = val_assunto.replace('\n', ' ')[:80] + "..." if len(val_assunto)>80 else val_assunto.replace('\n', ' ')
-                    
+                for registro in registros_novos:
+                    assinatura_atual = registro["assinatura"]
+                    is_dup = assinatura_atual in assinaturas_master or assinatura_atual in assinaturas_novas_vistas
+                    assunto_resumo = registro["ASSUNTO DA RECLAMAÇÃO"].replace('\n', ' ')
+                    assunto_resumo = assunto_resumo[:80] + "..." if len(assunto_resumo)>80 else assunto_resumo
+                    valores = (
+                        "🔴 REPETIDA" if is_dup else "🟢 NOVA!",
+                        registro["MÊS"], registro["UNIDADE"], registro["QUEM"],
+                        f"[{registro['origem']}] {assunto_resumo}"
+                    )
                     if is_dup:
-                        tree_comp.insert("", tk.END, values=("🔴 REPETIDA", val_mes, val_unid, val_quem, assunto_resumo), tags=("repetida",))
+                        total_repetidas += 1
+                        tree_comp.insert("", tk.END, values=valores, tags=("repetida",))
                     else:
-                        tree_comp.insert("", tk.END, values=("🟢 NOVA!", val_mes, val_unid, val_quem, assunto_resumo), tags=("nova",))
+                        tree_comp.insert("", tk.END, values=valores, tags=("nova",))
                         linhas_novas_para_exportar.append({
-                            "MÊS": val_mes, "UNIDADE": val_unid, "QUEM": val_quem, 
-                            "ASSUNTO DA RECLAMAÇÃO": val_assunto, "RESOLUÇÃO DA RECLAMAÇÃO": val_resol, "TAG": ""
+                            "MÊS": registro["MÊS"], "UNIDADE": registro["UNIDADE"], "QUEM": registro["QUEM"],
+                            "ASSUNTO DA RECLAMAÇÃO": registro["ASSUNTO DA RECLAMAÇÃO"],
+                            "RESOLUÇÃO DA RECLAMAÇÃO": registro["RESOLUÇÃO DA RECLAMAÇÃO"], "TAG": ""
                         })
+                        assinaturas_novas_vistas.add(assinatura_atual)
                         
-                lbl_status.config(text=f"Status: Análise concluída! Encontramos {len(linhas_novas_para_exportar)} reclamações inéditas.", fg="#27ae60")
-                messagebox.showinfo("✅ Concluído", f"Análise Finalizada!\n\nForam encontradas {len(linhas_novas_para_exportar)} reclamações NOVAS que não estão na sua Master.", parent=janela_comp)
+                lbl_status.config(text=f"Status: Análise concluída! {len(linhas_novas_para_exportar)} novas e {total_repetidas} repetidas.", fg="#27ae60")
+                messagebox.showinfo("✅ Concluído", f"Análise Finalizada!\n\nNOVAS para migrar: {len(linhas_novas_para_exportar)}\nREPETIDAS ignoradas: {total_repetidas}", parent=janela_comp)
 
             except Exception as e:
                 lbl_status.config(text="Status: Ocorreu um erro.", fg="#c0392b")
