@@ -42,6 +42,46 @@ except ImportError:
 
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
+
+def normalizar_texto_comparacao(valor):
+    """Normaliza células do Excel para comparar conteúdo sem diferença de maiúsculas/espaços."""
+    if valor is None:
+        return ""
+    if isinstance(valor, float) and math.isnan(valor):
+        return ""
+    texto = str(valor).strip().lower()
+    texto = " ".join(texto.split())
+    return texto
+
+
+def montar_assinatura_linha(mes, unidade, quem, assunto, resolucao=""):
+    """Cria uma chave de comparação usando os campos importantes da devolutiva."""
+    campos = [mes, unidade, quem, assunto, resolucao]
+    return " | ".join(normalizar_texto_comparacao(campo) for campo in campos)
+
+
+def obter_valor_linha(row, indice):
+    return str(row.iloc[indice]).strip() if len(row) > indice and normalizar_texto_comparacao(row.iloc[indice]) else ""
+
+
+def ler_planilha_excel(caminho, aba=None):
+    """Lê .xls/.xlsx; quando aba fica vazia, junta todas as abas do arquivo."""
+    aba_limpa = aba.strip() if isinstance(aba, str) else aba
+    sheet_name = aba_limpa if aba_limpa else None
+    dados = pd.read_excel(caminho, sheet_name=sheet_name, header=None).fillna("")
+    if isinstance(dados, dict):
+        partes = []
+        for nome_aba, df in dados.items():
+            if df.empty:
+                continue
+            df = df.copy()
+            df["__aba_origem__"] = nome_aba
+            partes.append(df)
+        if not partes:
+            return pd.DataFrame()
+        return pd.concat(partes, ignore_index=True)
+    return dados
+
 class AssistenteTriagem:
     def __init__(self, root):
         self.root = root
@@ -238,10 +278,14 @@ class AssistenteTriagem:
             
         tk.Button(frame_inputs, text="📂 Buscar", command=buscar_p2).grid(row=1, column=2, padx=5, pady=2)
 
-        tk.Label(frame_inputs, text="Aba/Ano da Master (Ex: 2024):", font=("Segoe UI", 10, "bold"), bg="#2c3e50", fg="white").grid(row=2, column=0, sticky="e", padx=5, pady=2)
+        tk.Label(frame_inputs, text="Aba da Planilha 1 (vazio = todas):", font=("Segoe UI", 10, "bold"), bg="#2c3e50", fg="white").grid(row=2, column=0, sticky="e", padx=5, pady=2)
+        entry_aba_p1 = tk.Entry(frame_inputs, width=15, font=("Segoe UI", 10))
+        entry_aba_p1.grid(row=2, column=1, sticky="w", padx=5, pady=2)
+
+        tk.Label(frame_inputs, text="Aba/Ano da Master (Ex: 2025):", font=("Segoe UI", 10, "bold"), bg="#2c3e50", fg="white").grid(row=3, column=0, sticky="e", padx=5, pady=2)
         entry_aba_comp = tk.Entry(frame_inputs, width=15, font=("Segoe UI", 10))
         entry_aba_comp.insert(0, self.entry_aba.get())
-        entry_aba_comp.grid(row=2, column=1, sticky="w", padx=5, pady=2)
+        entry_aba_comp.grid(row=3, column=1, sticky="w", padx=5, pady=2)
 
         # Fundo fixo para não sumir
         frame_bottom_area = tk.Frame(janela_comp)
@@ -301,7 +345,7 @@ class AssistenteTriagem:
                 # Leitura Super Segura da Planilha 1 (Sem Excel invisível travando tudo)
                 df1 = None
                 try:
-                    df1 = pd.read_excel(p1_path, header=None).fillna("")
+                    df1 = ler_planilha_excel(p1_path, entry_aba_p1.get())
                 except Exception as e_ler:
                     lbl_status.config(text="Status: Erro de formato no arquivo Novo.", fg="#c0392b")
                     messagebox.showerror("Ação Necessária: Formato Incompatível", 
@@ -324,40 +368,52 @@ class AssistenteTriagem:
                 ws = wb[aba_p2]
                 
                 dados_master = []
+                assinaturas_master = set()
+                assinaturas_novas_vistas = set()
                 for i, row in enumerate(ws.iter_rows(values_only=True), start=1):
                     if i == 1 or not any(row): continue 
-                    mes = str(row[0]).strip().lower() if len(row)>0 and row[0] is not None else ""
-                    unid = str(row[1]).strip().lower() if len(row)>1 and row[1] is not None else ""
-                    quem = str(row[2]).strip().lower() if len(row)>2 and row[2] is not None else ""
-                    ass = str(row[3]).strip().lower() if len(row)>3 and row[3] is not None else ""
-                    dados_master.append((mes, unid, quem, ass))
+                    mes = row[0] if len(row)>0 else ""
+                    unid = row[1] if len(row)>1 else ""
+                    quem = row[2] if len(row)>2 else ""
+                    ass = row[3] if len(row)>3 else ""
+                    resol = row[4] if len(row)>4 else ""
+                    assinatura = montar_assinatura_linha(mes, unid, quem, ass, resol)
+                    dados_master.append((
+                        normalizar_texto_comparacao(mes), normalizar_texto_comparacao(unid),
+                        normalizar_texto_comparacao(quem), normalizar_texto_comparacao(ass),
+                        normalizar_texto_comparacao(resol), assinatura
+                    ))
+                    assinaturas_master.add(assinatura)
                     
                 lbl_status.config(text="Status: Cruzando dados para encontrar repetidas...", fg="#8e44ad")
                 janela_comp.update_idletasks()
 
                 for idx, row in df1.iterrows():
-                    cols_count = len(row)
-                    val_mes = str(row.iloc[0]).strip() if cols_count > 0 else ""
-                    val_unid = str(row.iloc[1]).strip() if cols_count > 1 else ""
-                    val_quem = str(row.iloc[2]).strip() if cols_count > 2 else ""
-                    val_assunto = str(row.iloc[3]).strip() if cols_count > 3 else ""
-                    val_resol = str(row.iloc[4]).strip() if cols_count > 4 else ""
+                    val_mes = obter_valor_linha(row, 0)
+                    val_unid = obter_valor_linha(row, 1)
+                    val_quem = obter_valor_linha(row, 2)
+                    val_assunto = obter_valor_linha(row, 3)
+                    val_resol = obter_valor_linha(row, 4)
                     
                     if val_mes.upper() == "MÊS" or val_unid.upper() == "UNIDADE":
                         continue
                         
                     if not val_mes and not val_unid and not val_assunto: continue
                     
-                    is_dup = False
-                    # Compara com a base master
-                    for m_mes, m_unid, m_quem, m_ass in dados_master:
-                        if val_mes.lower() == m_mes and val_unid.lower() == m_unid and val_quem.lower() == m_quem:
-                            if val_assunto and m_ass:
-                                sim = difflib.SequenceMatcher(None, val_assunto.lower(), m_ass).ratio()
-                                if sim > 0.60:
-                                    is_dup = True
-                                    break
-                            else:
+                    assinatura_atual = montar_assinatura_linha(val_mes, val_unid, val_quem, val_assunto, val_resol)
+                    is_dup = assinatura_atual in assinaturas_master or assinatura_atual in assinaturas_novas_vistas
+                    # Se não for exatamente igual, faz uma comparação inteligente por campos principais.
+                    if not is_dup:
+                        n_mes = normalizar_texto_comparacao(val_mes)
+                        n_unid = normalizar_texto_comparacao(val_unid)
+                        n_quem = normalizar_texto_comparacao(val_quem)
+                        n_assunto = normalizar_texto_comparacao(val_assunto)
+                        n_resol = normalizar_texto_comparacao(val_resol)
+                        for m_mes, m_unid, m_quem, m_ass, m_resol, _assinatura in dados_master:
+                            campos_principais_iguais = n_mes == m_mes and n_unid == m_unid and n_quem == m_quem
+                            assunto_parecido = bool(n_assunto and m_ass and difflib.SequenceMatcher(None, n_assunto, m_ass).ratio() >= 0.85)
+                            resolucao_parecida = (not n_resol and not m_resol) or bool(n_resol and m_resol and difflib.SequenceMatcher(None, n_resol, m_resol).ratio() >= 0.85)
+                            if campos_principais_iguais and assunto_parecido and resolucao_parecida:
                                 is_dup = True
                                 break
                                 
@@ -371,6 +427,7 @@ class AssistenteTriagem:
                             "MÊS": val_mes, "UNIDADE": val_unid, "QUEM": val_quem, 
                             "ASSUNTO DA RECLAMAÇÃO": val_assunto, "RESOLUÇÃO DA RECLAMAÇÃO": val_resol, "TAG": ""
                         })
+                        assinaturas_novas_vistas.add(assinatura_atual)
                         
                 lbl_status.config(text=f"Status: Análise concluída! Encontramos {len(linhas_novas_para_exportar)} reclamações inéditas.", fg="#27ae60")
                 messagebox.showinfo("✅ Concluído", f"Análise Finalizada!\n\nForam encontradas {len(linhas_novas_para_exportar)} reclamações NOVAS que não estão na sua Master.", parent=janela_comp)
